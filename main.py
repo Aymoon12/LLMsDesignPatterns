@@ -12,6 +12,7 @@ import anthropic
 import time
 import re
 import json
+from google import genai
 
 # Configure logging
 logging.basicConfig(
@@ -165,6 +166,7 @@ class LLMEvaluator:
 
     def __init__(self):
         self.anthropic_client = None
+        self.gemini_client = None
         self.setup_clients()
 
     def setup_clients(self):
@@ -173,6 +175,7 @@ class LLMEvaluator:
         self.anthropic_client = anthropic.Anthropic(
             api_key=os.getenv("CLAUDE_API_KEY"),
             http_client=http_client)
+        self.gemini_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
 
     def query_claude(self, prompt: str, temperature: float = 0.3, max_retries: int = 3) -> tuple[Any, int] | tuple[
         None, int] | None:
@@ -202,6 +205,25 @@ class LLMEvaluator:
                     logger.error(f"Failed to query Claude after {max_retries} attempts")
                     return None, 0
         return None
+
+    def query_gemini(self, prompt: str, temperature: float = 0.3) -> tuple[Any, int] | tuple[None, int]:
+        """Query Gemini via Google AI API"""
+        try:
+            start_time = time.time()
+            response = self.gemini_client.models.generate_content(
+                model="gemini-2.0-flash-lite",
+                contents=prompt,
+                 config=genai.types.GenerateContentConfig(
+                    temperature=temperature,
+                    max_output_tokens=1000
+                )
+            )
+            response_time = int((time.time() - start_time) * 1000)
+
+            return response.text, response_time
+        except Exception as e:
+            print(f"Error querying Gemini: {e}")
+            return None, 0
 
     def _parse_response(self, response: str) -> Dict:
         """Parse LLM response to extract patterns, confidence, and reasoning"""
@@ -245,6 +267,8 @@ class LLMEvaluator:
         # Query appropriate model
         if model_name == 'claude':
             raw_response, response_time = self.query_claude(prompt, temperature)
+        elif model_name == 'gemini':
+            raw_response, response_time = self.query_gemini(prompt, temperature)
         else:
             raise ValueError(f"Unknown model: {model_name}")
 
@@ -269,7 +293,8 @@ class LLMEvaluator:
 
     def save_response_to_supabase(self, response: Dict):
         try:
-            supabase.table("model_responses").insert(response).execute()
+            if response is not None:
+                supabase.table("model_responses").insert(response).execute()
         except Exception as e:
             logger.error(f"Error saving response: {e}")
 
@@ -286,7 +311,7 @@ def main():
     evaluator = LLMEvaluator()
 
     requirement = requirements[0]
-    model_name = 'claude'
+    model_name = 'gemini'
     prompt_type = 'zero-shot'
     temperature = 0.3
     evaluation = evaluator.evaluate_requirement(requirement, model_name, prompt_type, temperature)
