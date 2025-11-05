@@ -13,6 +13,7 @@ import time
 import re
 import json
 from google import genai
+from openai import OpenAI
 
 # Configure logging
 logging.basicConfig(
@@ -167,7 +168,9 @@ class LLMEvaluator:
     def __init__(self):
         self.anthropic_client = None
         self.gemini_client = None
+        self.xai_client = None
         self.setup_clients()
+
 
     def setup_clients(self):
 
@@ -176,6 +179,11 @@ class LLMEvaluator:
             api_key=os.getenv("CLAUDE_API_KEY"),
             http_client=http_client)
         self.gemini_client = genai.Client(api_key=os.getenv("GOOGLE_API_KEY"))
+        self.xai_client = OpenAI(
+            api_key=os.getenv("GROK_API_KEY"),
+            base_url="https://api.x.ai/v1",
+            http_client=http_client
+        )
 
     def query_claude(self, prompt: str, temperature: float = 0.3, max_retries: int = 3) -> tuple[Any, int] | tuple[
         None, int] | None:
@@ -225,6 +233,30 @@ class LLMEvaluator:
             print(f"Error querying Gemini: {e}")
             return None, 0
 
+    def query_grok(self, prompt: str, temperature: float = 0.3) -> tuple[Any, int] | tuple[None, int]:
+        """Query Grok via XAI API"""
+
+        try:
+            start = time.time()
+
+            system_prompt = "You are Grok, a highly intelligent, helpful AI assistant.";
+
+            response = self.xai_client.chat.completions.create(
+                model="grok-beta",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature,
+                max_tokens=1000,
+            )
+            response_time = int((time.time() - start) * 1000)
+
+            return response.choices[0].message.content, response_time
+        except Exception as e:
+            print(f"Error querying Grok: {e}")
+            return None, 0
+
     def _parse_response(self, response: str) -> Dict:
         """Parse LLM response to extract patterns, confidence, and reasoning"""
         try:
@@ -269,6 +301,8 @@ class LLMEvaluator:
             raw_response, response_time = self.query_claude(prompt, temperature)
         elif model_name == 'gemini':
             raw_response, response_time = self.query_gemini(prompt, temperature)
+        elif model_name == 'grok':
+            raw_response, response_time = self.query_grok(prompt, temperature)
         else:
             raise ValueError(f"Unknown model: {model_name}")
 
@@ -311,7 +345,7 @@ def main():
     evaluator = LLMEvaluator()
 
     requirement = requirements[0]
-    model_name = 'gemini'
+    model_name = 'grok'
     prompt_type = 'zero-shot'
     temperature = 0.3
     evaluation = evaluator.evaluate_requirement(requirement, model_name, prompt_type, temperature)
