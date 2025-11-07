@@ -103,6 +103,48 @@ class SupabaseLoader:
             return []
 
     @staticmethod
+    def load_specific_rows(min: int, max: int) -> List[Dict]:
+        """Load all requirements with their ground truth patterns"""
+        try:
+            # Get all requirements
+            response = (supabase.table("requirements")
+                        .select("*")
+                        .gte("id", min)
+                        .lte("id", max)
+                        .execute())
+            requirements = []
+
+            for row in response.data:
+                # Get ground truth patterns for this requirement
+                gt_response = supabase.table("requirement_ground_truth") \
+                    .select("pattern_name, is_primary") \
+                    .eq("requirement_id", row["id"]) \
+                    .order("is_primary", desc=True) \
+                    .execute()
+
+                patterns = [p["pattern_name"] for p in gt_response.data]
+                primary_patterns = [p["pattern_name"] for p in gt_response.data if p["is_primary"]]
+
+                requirements.append({
+                    "id": row["id"],
+                    "text": row["requirement_type"],
+                    "source_type": row["source_type"],
+                    "ground_truth_patterns": patterns,
+                    "primary_patterns": primary_patterns,
+                    "metadata": row.get("metadata", {}),
+                    "notes": row.get("notes", "")
+                })
+
+            logger.info(f"Loaded {len(requirements)} requirements from Supabase")
+            return requirements
+
+        except Exception as e:
+            logger.error(f"Error loading requirements: {e}")
+            return []
+
+
+
+    @staticmethod
     def load_by_source(source_type: str) -> List[Dict]:
         response = supabase.table("requirements") \
             .select("*") \
@@ -534,7 +576,7 @@ class QuantitativeAnalyzer:
         return pd.DataFrame(results)
 
     def compute_stratified_metrics(self, stratify_by: str) -> pd.DataFrame:
-        """Compute metrics stratified by source_type or ambiguity_level"""
+        """Compute metrics stratified by source_type"""
         results = []
 
         for model in self.df['model'].unique():
@@ -601,14 +643,14 @@ class QuantitativeAnalyzer:
 def main():
 
     loader = SupabaseLoader()
-    # requirements = loader.load_all_requirements()
+    # requirements = loader.load_specific_rows(48, 72)
     #
     # if not requirements:
     #     logger.error("No requirements found in Supabase")
     #     return
     #
     # evaluator = LLMEvaluator()
-    # model_names= ['deepseek']
+    # model_names= ['claude', 'gemini', 'grok','deepseek']
     #
     # for model_name in model_names:
     #     for req in requirements:
