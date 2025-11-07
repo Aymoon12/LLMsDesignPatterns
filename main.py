@@ -14,6 +14,9 @@ import re
 import json
 from google import genai
 from openai import OpenAI
+import numpy as np
+import pandas as pd
+from sklearn.metrics import confusion_matrix
 
 # Configure logging
 logging.basicConfig(
@@ -169,6 +172,8 @@ class LLMEvaluator:
         self.anthropic_client = None
         self.gemini_client = None
         self.xai_client = None
+        self.openai_client = None
+        self.deepseek_client = None
         self.setup_clients()
 
 
@@ -184,6 +189,15 @@ class LLMEvaluator:
             base_url="https://api.x.ai/v1",
             http_client=http_client
         )
+        os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+        self.openai_client = OpenAI()
+
+        self.deepseek_client = OpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com/v1",
+            http_client=http_client
+        )
+
 
     def query_claude(self, prompt: str, temperature: float = 0.3, max_retries: int = 3) -> tuple[Any, int] | tuple[
         None, int] | None:
@@ -239,10 +253,10 @@ class LLMEvaluator:
         try:
             start = time.time()
 
-            system_prompt = "You are Grok, a highly intelligent, helpful AI assistant.";
+            system_prompt = "You are Grok, a highly intelligent, helpful AI assistant."
 
             response = self.xai_client.chat.completions.create(
-                model="grok-beta",
+                model="grok-4-fast",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": prompt}
@@ -256,6 +270,49 @@ class LLMEvaluator:
         except Exception as e:
             print(f"Error querying Grok: {e}")
             return None, 0
+
+    def query_gpt5(self, prompt: str, temperature: float = 0.3) -> tuple[Any, int] | tuple[None, int]:
+        """Query OpenAI GPT-5"""
+        try:
+            start_time = time.time()
+            response = self.openai_client.chat.completions.create(
+                model="gpt-5",
+                messages=[
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature,
+                max_tokens=1000
+            )
+            response_time = int((time.time() - start_time) * 1000)
+            response_text = response.choices[0].message.content
+            return response_text, response_time
+        except Exception as e:
+            print(f"Error querying OpenAI GPT-5: {e}")
+            return None, 0
+
+    def query_deepseek(self, prompt: str, temperature: float = 0.3) -> tuple[Any, int] | tuple[None, int]:
+        """Query DeepSeek"""
+        try:
+            start_time = time.time()
+            system_prompt = "You are DeepSeek, a highly intelligent, helpful AI assistant."
+
+            response = self.deepseek_client.chat.completions.create(
+                model="deepseek-chat",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=temperature,
+                max_tokens=1000
+            )
+            response_time = int((time.time() - start_time) * 1000)
+            response_text = response.choices[0].message.content
+            return response_text, response_time
+        except Exception as e:
+            print(f"Error querying Deepseek: {e}")
+            return None, 0
+
+
 
     def _parse_response(self, response: str) -> Dict:
         """Parse LLM response to extract patterns, confidence, and reasoning"""
@@ -303,6 +360,10 @@ class LLMEvaluator:
             raw_response, response_time = self.query_gemini(prompt, temperature)
         elif model_name == 'grok':
             raw_response, response_time = self.query_grok(prompt, temperature)
+        elif model_name == 'gpt5':
+            raw_response, response_time = self.query_gpt5(prompt, temperature)
+        elif model_name == 'deepseek':
+            raw_response, response_time = self.query_deepseek(prompt, temperature)
         else:
             raise ValueError(f"Unknown model: {model_name}")
 
@@ -333,26 +394,235 @@ class LLMEvaluator:
             logger.error(f"Error saving response: {e}")
 
 
+class QuantitativeAnalyzer:
+    """Compute quantitative metrics from Supabase data"""
+
+    def __init__(self):
+        self.load_data()
+
+    def load_data(self):
+        """Load requirements and responses from Supabase"""
+        # Load requirements with ground truth
+        req_response = supabase.table("requirements").select("*").execute()
+        self.requirements = {}
+
+        for row in req_response.data:
+            gt_response = supabase.table("requirement_ground_truth") \
+                .select("pattern_name, is_primary") \
+                .eq("requirement_id", row["id"]) \
+                .execute()
+
+            patterns = [p["pattern_name"] for p in gt_response.data]
+            primary_patterns = [p["pattern_name"] for p in gt_response.data if p["is_primary"]]
+
+            self.requirements[row["id"]] = {
+                "id": row["id"],
+                "text": row["requirement_type"],
+                "source_type": row["source_type"],
+                "ground_truth": patterns,
+                "primary_patterns": primary_patterns
+            }
+
+        # Load model responses
+        resp_response = supabase.table("model_responses").select("*").execute()
+        self.responses = resp_response.data
+
+        # Build analysis DataFrame
+        self._build_dataframe()
+
+        print(f"Loaded {len(self.requirements)} requirements")
+        print(f"Loaded {len(self.responses)} model responses")
+
+    def _build_dataframe(self):
+        """Convert responses to pandas DataFrame for analysis"""
+        data = []
+
+        for resp in self.responses:
+            req = self.requirements[resp["requirement_id"]]
+
+            predicted = set(resp["predicted_patterns"])
+            ground_truth = set(req["ground_truth"])
+            primary_gt = set(req["primary_patterns"])
+
+            # Calculate correctness metrics
+            exact_match = predicted == ground_truth
+            partial_match = len(predicted & ground_truth) > 0
+            top1_correct = (len(resp["predicted_patterns"]) > 0 and
+                            resp["predicted_patterns"][0] in req["ground_truth"])
+            primary_correct = (len(resp["predicted_patterns"]) > 0 and
+                               resp["predicted_patterns"][0] in req["primary_patterns"])
+
+            confidence_scores = resp.get("confidence_scores") or {}
+            avg_confidence = np.mean(list(confidence_scores.values())) if confidence_scores else 0
+
+            data.append({
+                'requirement_id': resp["requirement_id"],
+                'model': resp["model_name"],
+                'prompt_type': resp["prompt_type"],
+                'source_type': req["source_type"],
+                'ground_truth': list(ground_truth),
+                'predicted': list(predicted),
+                'exact_match': exact_match,
+                'partial_match': partial_match,
+                'top1_correct': top1_correct,
+                'primary_correct': primary_correct,
+                'num_patterns_predicted': len(predicted),
+                'confidence_avg': avg_confidence,
+                'reasoning_length': len(resp.get("reasoning", "")),
+                'response_time_ms': resp.get("response_time_ms", 0)
+            })
+
+        self.df = pd.DataFrame(data)
+
+    def compute_overall_metrics(self) -> pd.DataFrame:
+        """Compute overall accuracy, precision, recall"""
+        metrics = []
+
+        for model in self.df['model'].unique():
+            for prompt_type in self.df['prompt_type'].unique():
+                subset = self.df[
+                    (self.df['model'] == model) &
+                    (self.df['prompt_type'] == prompt_type)
+                    ]
+
+                if len(subset) == 0:
+                    continue
+
+                metrics.append({
+                    'model': model,
+                    'prompt_type': prompt_type,
+                    'count': len(subset),
+                    'exact_match_accuracy': subset['exact_match'].mean(),
+                    'partial_match_accuracy': subset['partial_match'].mean(),
+                    'top1_accuracy': subset['top1_correct'].mean(),
+                    'primary_pattern_accuracy': subset['primary_correct'].mean(),
+                    'avg_confidence': subset['confidence_avg'].mean(),
+                    'avg_patterns_predicted': subset['num_patterns_predicted'].mean(),
+                    'avg_response_time_ms': subset['response_time_ms'].mean()
+                })
+
+        return pd.DataFrame(metrics)
+
+    def compute_per_pattern_metrics(self) -> pd.DataFrame:
+        """Compute precision, recall, F1 for each pattern"""
+        results = []
+
+        for model in self.df['model'].unique():
+            model_df = self.df[self.df['model'] == model]
+
+            for pattern in GOF_PATTERNS:
+                tp = sum(1 for _, row in model_df.iterrows()
+                         if pattern in row['ground_truth'] and pattern in row['predicted'])
+                fp = sum(1 for _, row in model_df.iterrows()
+                         if pattern not in row['ground_truth'] and pattern in row['predicted'])
+                fn = sum(1 for _, row in model_df.iterrows()
+                         if pattern in row['ground_truth'] and pattern not in row['predicted'])
+
+                precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+                recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+                f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
+
+                results.append({
+                    'model': model,
+                    'pattern': pattern,
+                    'precision': precision,
+                    'recall': recall,
+                    'f1': f1,
+                    'support': tp + fn
+                })
+
+        return pd.DataFrame(results)
+
+    def compute_stratified_metrics(self, stratify_by: str) -> pd.DataFrame:
+        """Compute metrics stratified by source_type or ambiguity_level"""
+        results = []
+
+        for model in self.df['model'].unique():
+            for category in self.df[stratify_by].unique():
+                subset = self.df[
+                    (self.df['model'] == model) &
+                    (self.df[stratify_by] == category)
+                    ]
+
+                if len(subset) == 0:
+                    continue
+
+                results.append({
+                    'model': model,
+                    stratify_by: category,
+                    'exact_match_accuracy': subset['exact_match'].mean(),
+                    'top1_accuracy': subset['top1_correct'].mean(),
+                    'count': len(subset)
+                })
+
+        return pd.DataFrame(results)
+
+    def compute_confusion_matrix(self, model_name: str) -> pd.DataFrame:
+        """Generate confusion matrix for a specific model"""
+        model_df = self.df[self.df['model'] == model_name]
+
+        y_true = []
+        y_pred = []
+
+        for _, row in model_df.iterrows():
+            if len(row['ground_truth']) > 0 and len(row['predicted']) > 0:
+                y_true.append(row['ground_truth'][0])
+                y_pred.append(row['predicted'][0])
+
+        if len(y_true) == 0:
+            return pd.DataFrame()
+
+        cm = confusion_matrix(y_true, y_pred, labels=GOF_PATTERNS)
+        return pd.DataFrame(cm, index=GOF_PATTERNS, columns=GOF_PATTERNS)
+
+    def export_metrics_report(self, output_dir: str = "./results"):
+        """Export comprehensive metrics report"""
+        os.makedirs(output_dir, exist_ok=True)
+
+        # Overall metrics
+        overall = self.compute_overall_metrics()
+        overall.to_csv(f"{output_dir}/overall_metrics.csv", index=False)
+        print(f"Saved overall metrics")
+        print(overall.to_string())
+
+        # Per-pattern metrics
+        per_pattern = self.compute_per_pattern_metrics()
+        per_pattern.to_csv(f"{output_dir}/per_pattern_metrics.csv", index=False)
+        print(f"\nSaved per-pattern metrics")
+
+        # Stratified by source
+        by_source = self.compute_stratified_metrics('source_type')
+        by_source.to_csv(f"{output_dir}/metrics_by_source.csv", index=False)
+        print(f"Saved metrics by source type")
+        print(by_source.to_string())
+
+        print(f"\nAll metrics exported to {output_dir}/")
+
 def main():
 
     loader = SupabaseLoader()
-    requirements = loader.load_all_requirements()
+    # requirements = loader.load_all_requirements()
+    #
+    # if not requirements:
+    #     logger.error("No requirements found in Supabase")
+    #     return
+    #
+    # evaluator = LLMEvaluator()
+    # model_names= ['deepseek']
+    #
+    # for model_name in model_names:
+    #     for req in requirements:
+    #         evaluation = evaluator.evaluate_requirement(req, model_name, 'zero-shot', 0.3)
+    #         evaluator.save_response_to_supabase(evaluation)
 
-    if not requirements:
-        logger.error("No requirements found in Supabase")
+    analyzer = QuantitativeAnalyzer()
+
+    if len(analyzer.responses) == 0:
+        print("No responses found in database. Run evaluations first.")
         return
 
-    evaluator = LLMEvaluator()
-
-    requirement = requirements[0]
-    model_name = 'grok'
-    prompt_type = 'zero-shot'
-    temperature = 0.3
-    evaluation = evaluator.evaluate_requirement(requirement, model_name, prompt_type, temperature)
-    evaluator.save_response_to_supabase(evaluation)
-
-
-    print(evaluation)
+    # Export all metrics
+    analyzer.export_metrics_report(output_dir="./results")
 
 
 if __name__ == "__main__":
