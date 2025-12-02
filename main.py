@@ -195,7 +195,8 @@ class PromptGenerator:
 
         Example 1:
         Requirement: "The system needs to ensure only one database connection pool exists"
-        Response: {{"patterns": ["Singleton"], "confidence": {{"Singleton": 0.98}}, "reasoning": "This requirement explicitly needs a single instance with global access, which is the core intent of the Singleton pattern."}}
+        Response: {{"patterns": ["Singleton"], "confidence": {{"Singleton": 0.98}}, "reasoning": "This requirement explicitly needs a single instance with global access, which is 
+        the core intent of the Singleton pattern."}}
         
         Example 2:
         Requirement: "Different payment methods should be selectable at runtime without changing client code"
@@ -510,6 +511,7 @@ class QuantitativeAnalyzer:
                 'primary_correct': primary_correct,
                 'num_patterns_predicted': len(predicted),
                 'confidence_avg': avg_confidence,
+                'confidence_scores': confidence_scores,
                 'reasoning_length': len(resp.get("reasoning", "")),
                 'response_time_ms': resp.get("response_time_ms", 0)
             })
@@ -546,8 +548,35 @@ class QuantitativeAnalyzer:
         return pd.DataFrame(metrics)
 
     def compute_per_pattern_metrics(self) -> pd.DataFrame:
-        """Compute precision, recall, F1 for each pattern"""
+        """Compute precision, recall, F1, and average confidence for each pattern"""
         results = []
+
+        # Define pattern categories
+        pattern_categories = {
+            'Singleton': 'Creational',
+            'Factory Method': 'Creational',
+            'Abstract Factory': 'Creational',
+            'Builder': 'Creational',
+            'Prototype': 'Creational',
+            'Adapter': 'Structural',
+            'Bridge': 'Structural',
+            'Composite': 'Structural',
+            'Decorator': 'Structural',
+            'Facade': 'Structural',
+            'Flyweight': 'Structural',
+            'Proxy': 'Structural',
+            'Chain of Responsibility': 'Behavioral',
+            'Command': 'Behavioral',
+            'Interpreter': 'Behavioral',
+            'Iterator': 'Behavioral',
+            'Mediator': 'Behavioral',
+            'Memento': 'Behavioral',
+            'Observer': 'Behavioral',
+            'State': 'Behavioral',
+            'Strategy': 'Behavioral',
+            'Template Method': 'Behavioral',
+            'Visitor': 'Behavioral'
+        }
 
         for model in self.df['model'].unique():
             model_df = self.df[self.df['model'] == model]
@@ -564,13 +593,130 @@ class QuantitativeAnalyzer:
                 recall = tp / (tp + fn) if (tp + fn) > 0 else 0
                 f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0
 
+                # Calculate average confidence for this specific pattern
+                confidences = []
+                for _, row in model_df.iterrows():
+                    if pattern in row['predicted']:
+                        if isinstance(row['confidence_scores'], dict) and pattern in row['confidence_scores']:
+                            confidences.append(row['confidence_scores'][pattern])
+
+                avg_confidence = np.mean(confidences) if confidences else 0
+
                 results.append({
                     'model': model,
                     'pattern': pattern,
+                    'category': pattern_categories.get(pattern, 'Unknown'),
                     'precision': precision,
                     'recall': recall,
                     'f1': f1,
-                    'support': tp + fn
+                    'support': tp + fn,
+                    'avg_confidence': avg_confidence,
+                    'prediction_count': tp + fp
+                })
+
+        return pd.DataFrame(results)
+
+    def compute_category_metrics(self) -> pd.DataFrame:
+        """Compute aggregated metrics by pattern category (Creational, Structural, Behavioral)"""
+
+        # Get per-pattern metrics first
+        per_pattern = self.compute_per_pattern_metrics()
+
+        # Group by model and category
+        category_results = []
+
+        for model in per_pattern['model'].unique():
+            model_data = per_pattern[per_pattern['model'] == model]
+
+            for category in ['Creational', 'Structural', 'Behavioral']:
+                category_data = model_data[model_data['category'] == category]
+
+                if len(category_data) == 0:
+                    continue
+
+                # Weighted averages by support
+                total_support = category_data['support'].sum()
+
+                if total_support > 0:
+                    weighted_precision = (category_data['precision'] * category_data['support']).sum() / total_support
+                    weighted_recall = (category_data['recall'] * category_data['support']).sum() / total_support
+                    weighted_f1 = (category_data['f1'] * category_data['support']).sum() / total_support
+                else:
+                    weighted_precision = category_data['precision'].mean()
+                    weighted_recall = category_data['recall'].mean()
+                    weighted_f1 = category_data['f1'].mean()
+
+                category_results.append({
+                    'model': model,
+                    'category': category,
+                    'avg_precision': weighted_precision,
+                    'avg_recall': weighted_recall,
+                    'avg_f1': weighted_f1,
+                    'avg_confidence': category_data['avg_confidence'].mean(),
+                    'total_support': total_support,
+                    'pattern_count': len(category_data),
+                    'total_predictions': category_data['prediction_count'].sum()
+                })
+
+        return pd.DataFrame(category_results)
+
+    def compute_category_accuracy(self) -> pd.DataFrame:
+        """Compute accuracy metrics by pattern category"""
+
+        # Pattern categories mapping
+        pattern_categories = {
+            'Singleton': 'Creational',
+            'Factory Method': 'Creational',
+            'Abstract Factory': 'Creational',
+            'Builder': 'Creational',
+            'Prototype': 'Creational',
+            'Adapter': 'Structural',
+            'Bridge': 'Structural',
+            'Composite': 'Structural',
+            'Decorator': 'Structural',
+            'Facade': 'Structural',
+            'Flyweight': 'Structural',
+            'Proxy': 'Structural',
+            'Chain of Responsibility': 'Behavioral',
+            'Command': 'Behavioral',
+            'Interpreter': 'Behavioral',
+            'Iterator': 'Behavioral',
+            'Mediator': 'Behavioral',
+            'Memento': 'Behavioral',
+            'Observer': 'Behavioral',
+            'State': 'Behavioral',
+            'Strategy': 'Behavioral',
+            'Template Method': 'Behavioral',
+            'Visitor': 'Behavioral'
+        }
+
+        results = []
+
+        for model in self.df['model'].unique():
+            model_df = self.df[self.df['model'] == model]
+
+            for category in ['Creational', 'Structural', 'Behavioral']:
+                # Filter rows where ground truth contains a pattern from this category
+                category_rows = []
+                for _, row in model_df.iterrows():
+                    ground_truth_categories = [pattern_categories.get(p) for p in row['ground_truth']]
+                    if category in ground_truth_categories:
+                        category_rows.append(row)
+
+                if not category_rows:
+                    continue
+
+                category_df = pd.DataFrame(category_rows)
+
+                results.append({
+                    'model': model,
+                    'category': category,
+                    'exact_match_accuracy': category_df['exact_match'].mean(),
+                    'partial_match_accuracy': category_df['partial_match'].mean(),
+                    'top1_accuracy': category_df['top1_correct'].mean(),
+                    'avg_confidence': category_df['confidence_avg'].mean(),
+                    'avg_patterns_predicted': category_df['num_patterns_predicted'].mean(),
+                    'count': len(category_df)
                 })
 
         return pd.DataFrame(results)
@@ -632,6 +778,20 @@ class QuantitativeAnalyzer:
         per_pattern.to_csv(f"{output_dir}/per_pattern_metrics.csv", index=False)
         print(f"\nSaved per-pattern metrics")
 
+        # Category-aggregated metrics
+        category_metrics = self.compute_category_metrics()
+        category_metrics.to_csv(f"{output_dir}/category_metrics.csv", index=False)
+        print(f"Saved category-aggregated metrics")
+        print("\nCategory Performance (Weighted by Support):")
+        print(category_metrics.to_string())
+
+        # Category accuracy metrics
+        category_accuracy = self.compute_category_accuracy()
+        category_accuracy.to_csv(f"{output_dir}/category_accuracy.csv", index=False)
+        print(f"\nSaved category accuracy metrics")
+        print("\nAccuracy by Pattern Category:")
+        print(category_accuracy.to_string())
+
         # Stratified by source
         by_source = self.compute_stratified_metrics('source_type')
         by_source.to_csv(f"{output_dir}/metrics_by_source.csv", index=False)
@@ -643,7 +803,7 @@ class QuantitativeAnalyzer:
 def main():
 
     loader = SupabaseLoader()
-    # requirements = loader.load_specific_rows(48, 72)
+    # requirements = loader.load_specific_rows(73, 217)
     #
     # if not requirements:
     #     logger.error("No requirements found in Supabase")
@@ -656,6 +816,7 @@ def main():
     #     for req in requirements:
     #         evaluation = evaluator.evaluate_requirement(req, model_name, 'zero-shot', 0.3)
     #         evaluator.save_response_to_supabase(evaluation)
+    #
 
     analyzer = QuantitativeAnalyzer()
 
